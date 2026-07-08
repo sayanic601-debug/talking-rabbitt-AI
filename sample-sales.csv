@@ -1,0 +1,16 @@
+Period,Sales,Region,Segment
+2025-Q1,12000,Midwest,Enterprise
+2025-Q2,15000,Midwest,Enterprise
+2025-Q3,18000,Midwest,Enterprise
+2025-Q4,14000,Midwest,Enterprise
+2026-Q1,11000,Midwest,Enterprise
+2025-Q1,25000,West,Enterprise
+2025-Q2,28000,West,Enterprise
+2025-Q3,32000,West,Enterprise
+2025-Q4,35000,West,Enterprise
+2026-Q1,38000,West,Enterprise
+2025-Q1,8000,East,SMB
+2025-Q2,9000,East,SMB
+2025-Q3,7500,East,SMB
+2025-Q4,6000,East,SMB
+2026-Q1,5000,East,SMB
