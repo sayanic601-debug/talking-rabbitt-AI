@@ -1,5 +1,7 @@
 import { useEffect, useState, useRef, type FormEvent } from 'react'
 import rabbitIcon from '../talking-rabbit-icon.jpeg'
+import AutoDashboard from './components/AutoDashboard'
+import DataVisualizer from './components/DataVisualizer'
 
 type View =
   | 'landing'
@@ -16,8 +18,13 @@ type IngestionStage = 'idle' | 'ingesting' | 'schema' | 'synced'
 type Message = {
   role: 'assistant' | 'user'
   text: string
-  graph?: 'bar' | 'line' | 'none'
-  chartData?: Array<{ label: string; value: number; forecast?: boolean }>
+  kpis?: Array<{ label: string; value: string; trend?: 'up' | 'down'; change?: string }>
+  graph?: {
+    type: 'line' | 'bar' | 'horizontalBar' | 'pie' | 'donut' | 'area' | 'scatter' | 'heatmap' | 'radar' | 'funnel' | 'waterfall' | 'none'
+    title: string
+    data: Array<{ label?: string; value?: number; x?: string | number; y?: string | number; forecast?: boolean }>
+  }
+  nextQuestions?: string[]
 }
 
 const STORAGE_KEY = 'talking-rabbit-view'
@@ -151,21 +158,65 @@ function App() {
     setErrorAlert(null)
     setIngestionStage('ingesting')
     
+    console.log(`[FRONTEND] Upload request initiated for file: "${file.name}" (${file.size} bytes, type: "${file.type}")`);
+    
     const formData = new FormData()
     formData.append('file', file)
     
     try {
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      })
-      
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.detail || 'Failed to upload CSV file.')
+      let response;
+      try {
+        response = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+      } catch (networkError: any) {
+        console.error("[FRONTEND] Network error during upload:", networkError);
+        throw new Error("Backend server is not reachable.");
       }
       
-      const data = await response.json()
+      console.log(`[FRONTEND] Upload response received with status: ${response.status} ${response.statusText}`);
+      
+      const contentType = response.headers.get('content-type');
+      const isJson = contentType && contentType.includes('application/json');
+      
+      if (!response.ok) {
+        let errorMessage = "Upload endpoint returned an error.";
+        if (isJson) {
+          try {
+            const errorData = await response.json();
+            errorMessage = errorData.error || errorData.detail || errorMessage;
+            if (errorMessage.includes("parsing") || errorMessage.includes("parse") || errorMessage.includes("empty")) {
+              errorMessage = "CSV parsing failed.";
+            }
+          } catch (e) {
+            console.error("[FRONTEND] Failed to parse JSON error details:", e);
+          }
+        } else {
+          const rawText = await response.text().catch(() => "");
+          console.warn("[FRONTEND] Non-JSON error body:", rawText);
+        }
+        throw new Error(errorMessage);
+      }
+      
+      if (!isJson) {
+        console.error("[FRONTEND] Expected JSON response but received content-type:", contentType);
+        throw new Error("Invalid response from server.");
+      }
+      
+      const responseData = await response.json();
+      console.log("[FRONTEND] Upload success response:", responseData);
+      
+      if (!responseData || typeof responseData !== 'object' || responseData.success === false) {
+        const errorMsg = responseData?.error || "Invalid response from server.";
+        throw new Error(errorMsg);
+      }
+      
+      const data = responseData.data;
+      if (!data) {
+        throw new Error("Invalid response from server.");
+      }
+      
       setIngestionStage('schema')
       
       window.setTimeout(() => {
@@ -181,6 +232,7 @@ function App() {
       }, 800)
       
     } catch (err: any) {
+      console.error("[FRONTEND] CSV upload process failed:", err.message);
       setIngestionStage('idle')
       setErrorAlert(err.message || 'An error occurred during file upload.')
       setMessages((current) => [
@@ -197,54 +249,82 @@ function App() {
     }
   }
 
-  const handlePrompt = async (event: FormEvent) => {
-    event.preventDefault()
-    if (!prompt.trim() || isQuerying) return
-    const text = prompt.trim()
-    setPrompt('')
+  const executeQuery = async (queryText: string) => {
+    if (!queryText.trim() || isQuerying) return
     
     setMessages((current) => [
       ...current,
-      { role: 'user', text }
+      { role: 'user', text: queryText }
     ])
     
     setIsQuerying(true)
+    console.log(`[FRONTEND] Submitting query: "${queryText}"`);
     
     try {
-      const response = await fetch('/api/query', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ prompt: text })
-      })
-      
-      if (!response.ok) {
-        throw new Error('Server error occurred.')
+      let response;
+      try {
+        response = await fetch('/api/query', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ prompt: queryText })
+        });
+      } catch (networkError: any) {
+        console.error("[FRONTEND] Network error during query:", networkError);
+        throw new Error("Backend server is not reachable.");
       }
       
-      const data = await response.json()
+      console.log(`[FRONTEND] Query response status: ${response.status} ${response.statusText}`);
+      
+      const contentType = response.headers.get('content-type');
+      const isJson = contentType && contentType.includes('application/json');
+      
+      if (!response.ok) {
+        throw new Error("AI processing failed.");
+      }
+      
+      if (!isJson) {
+        throw new Error("Invalid response from server.");
+      }
+      
+      const responseData = await response.json();
+      console.log("[FRONTEND] Query response data received:", responseData);
+      
+      if (!responseData || responseData.success === false) {
+        throw new Error(responseData?.error || "AI processing failed.");
+      }
+      
+      const resData = responseData.data;
       
       setMessages((current) => [
         ...current,
         {
           role: 'assistant',
-          text: data.text,
-          graph: data.graph,
-          chartData: data.chartData
+          text: resData.text,
+          kpis: resData.kpis,
+          graph: resData.graph,
+          nextQuestions: resData.nextQuestions
         }
       ])
     } catch (err: any) {
+      console.error("[FRONTEND] Query prompt handler failed:", err.message);
       setMessages((current) => [
         ...current,
         {
           role: 'assistant',
-          text: `⚠️ Failed to get a response from Rabbit: ${err.message || 'Server error.'}`
+          text: `⚠️ Failed to get a response from Rabbit: ${err.message || 'AI processing failed.'}`
         }
       ])
     } finally {
       setIsQuerying(false)
     }
+  }
+
+  const handlePrompt = async (event: FormEvent) => {
+    event.preventDefault()
+    executeQuery(prompt)
+    setPrompt('')
   }
 
   const renderLanding = () => (
@@ -637,33 +717,47 @@ function App() {
     </div>)
   }
 
-  const renderDashboard = () => renderPanel('Command Center', 'Agentic AI workflow for your latest data signal', <div className="grid gap-8 xl:grid-cols-[0.95fr_1.05fr]">
-    <div className="rounded-[24px] border border-white/10 bg-[#0E131F] p-7">
+  const renderDashboard = () => renderPanel('Command Center', 'Agentic AI workflow for your latest data signal', <div className="grid gap-8 xl:grid-cols-[1.05fr_0.95fr]">
+    <div className="rounded-[24px] border border-white/10 bg-[#0E131F] p-7 flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-sm uppercase tracking-[0.3em] text-slate-500">Live ingestion</div>
-          <h3 className="mt-2 text-2xl font-semibold text-white">Revenue pulse</h3>
+          <div className="text-sm uppercase tracking-[0.3em] text-[#00C48C]">Enterprise BI Copilot</div>
+          <h3 className="mt-2 text-2xl font-bold text-white">Data Signal Hub</h3>
         </div>
       </div>
 
-      <button 
-        className="mt-8 flex w-full flex-col items-center justify-center rounded-[24px] border border-dashed border-[#00C48C]/40 bg-[#05070B]/70 px-6 py-10 text-center transition hover:border-[#00C48C] cursor-pointer" 
-        onClick={() => fileInputRef.current?.click()}
-        disabled={ingestionStage === 'ingesting' || ingestionStage === 'schema'}
-      >
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#00C48C] text-2xl text-[#03110c]">
-          {ingestionStage === 'ingesting' || ingestionStage === 'schema' ? '⏳' : '⬆'}
+      {/* Conditionally render compact active dataset info or full upload area */}
+      {datasetInfo ? (
+        <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-[#05070B]/60 p-4 transition-all duration-300">
+          <div className="flex items-center gap-3">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 text-sm font-bold">✓</span>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Active Signal</div>
+              <div className="text-xs font-semibold text-white truncate max-w-[180px]" title={datasetInfo.filename}>{datasetInfo.filename}</div>
+            </div>
+          </div>
+          <button 
+            className="rounded-full bg-slate-800 border border-white/5 hover:bg-slate-750 px-3.5 py-1.5 text-xs text-slate-200 transition cursor-pointer"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={ingestionStage === 'ingesting' || ingestionStage === 'schema'}
+          >
+            Change Dataset
+          </button>
         </div>
-        <div className="mt-4 text-lg font-semibold text-white">
-          {datasetInfo ? datasetInfo.filename : 'Upload CSV file'}
-        </div>
-        <div className="mt-2 text-sm text-slate-400">
-          {ingestionStage === 'ingesting' ? 'Uploading file to backend...' : 
-           ingestionStage === 'schema' ? 'Analyzing schema and statistics...' :
-           ingestionStage === 'synced' ? 'Dataset synced. Click to re-upload another file.' :
-           'Click to select and upload a CSV file'}
-        </div>
-      </button>
+      ) : (
+        <button 
+          className="mt-2 flex w-full flex-col items-center justify-center rounded-[24px] border border-dashed border-[#00C48C]/40 bg-[#05070B]/70 px-6 py-8 text-center transition hover:border-[#00C48C] cursor-pointer" 
+          onClick={() => fileInputRef.current?.click()}
+          disabled={ingestionStage === 'ingesting' || ingestionStage === 'schema'}
+        >
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#00C48C] text-xl text-[#03110c]">
+            {ingestionStage === 'ingesting' || ingestionStage === 'schema' ? '⏳' : '⬆'}
+          </div>
+          <div className="mt-3 text-base font-semibold text-white">Upload Business Signal</div>
+          <div className="mt-1 text-xs text-slate-400">Click to select and ingest a CSV file</div>
+        </button>
+      )}
+
       <input 
         type="file" 
         ref={fileInputRef} 
@@ -672,97 +766,138 @@ function App() {
         onChange={handleFileChange} 
       />
 
-      <div className="mt-6 rounded-[20px] border border-white/10 bg-[#05070B] p-5">
-        <div className="flex items-center justify-between text-sm text-slate-400">
-          <span>Stage</span>
-          <span>{ingestionStage === 'idle' ? 'Waiting' : ingestionStage === 'ingesting' ? 'Ingesting' : ingestionStage === 'schema' ? 'Processing Schema' : 'Synced'}</span>
+      {ingestionStage !== 'synced' && ingestionStage !== 'idle' && (
+        <div className="rounded-[20px] border border-white/10 bg-[#05070B] p-4">
+          <div className="flex items-center justify-between text-xs text-slate-400">
+            <span>Ingestion Pipeline</span>
+            <span>{ingestionStage === 'ingesting' ? 'Ingesting data stream...' : 'Profiling schema and calculating quality...'}</span>
+          </div>
+          <div className="mt-3 h-2 rounded-full bg-slate-800">
+            <div className={`h-2 rounded-full bg-gradient-to-r from-[#00C48C] to-[#8B5CF6] transition-all duration-300 ${ingestionStage === 'ingesting' ? 'w-1/3' : 'w-2/3'}`} />
+          </div>
         </div>
-        <div className="mt-4 h-2 rounded-full bg-slate-800">
-          <div className={`h-2 rounded-full bg-gradient-to-r from-[#00C48C] to-[#8B5CF6] transition-all ${ingestionStage === 'idle' ? 'w-0' : ingestionStage === 'ingesting' ? 'w-1/3' : ingestionStage === 'schema' ? 'w-2/3' : 'w-full'}`} />
-        </div>
-      </div>
+      )}
 
       {errorAlert && (
-        <div className="mt-4 p-3 rounded-2xl border border-red-500/20 bg-red-500/10 text-red-400 text-xs leading-5">
+        <div className="p-3 rounded-2xl border border-red-500/20 bg-red-500/10 text-red-400 text-xs leading-5">
           {errorAlert}
         </div>
       )}
 
       {datasetInfo && (
-        <div className="mt-6 rounded-[20px] border border-white/10 bg-[#05070B] p-5 text-sm">
-          <div className="text-xs uppercase tracking-[0.3em] text-slate-500 mb-4">Dataset Schema</div>
-          <div className="flex justify-between mb-2">
-            <span className="text-slate-400">File:</span>
-            <span className="text-white font-medium truncate max-w-[180px]" title={datasetInfo.filename}>{datasetInfo.filename}</span>
-          </div>
-          <div className="flex justify-between mb-2">
-            <span className="text-slate-400">Rows:</span>
-            <span className="text-white font-medium">{datasetInfo.rowCount}</span>
-          </div>
-          <div className="border-t border-white/5 my-3 pt-3">
-            <span className="text-slate-400 block mb-2">Columns:</span>
-            <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-1">
-              {datasetInfo.columns.map((c: any) => (
-                <span key={c.name} className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-white/5 flex items-center gap-1">
-                  {c.name}
-                  <span className={`text-[8px] px-1 rounded-sm ${
-                    c.type === 'temporal' ? 'bg-amber-500/20 text-amber-300' :
-                    c.type === 'numeric' ? 'bg-emerald-500/20 text-emerald-300' :
-                    c.type === 'categorical' ? 'bg-purple-500/20 text-purple-300' : 'bg-slate-700/20 text-slate-400'
-                  }`}>
-                    {c.type}
-                  </span>
-                </span>
-              ))}
-            </div>
-          </div>
+        <div className="mt-2 border-t border-white/5 pt-4">
+          <AutoDashboard datasetInfo={datasetInfo} />
         </div>
       )}
     </div>
 
-    <div className="rounded-[24px] border border-white/10 bg-[#0E131F] p-7">
+    <div className="rounded-[24px] border border-white/10 bg-[#0E131F] p-7 flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-sm uppercase tracking-[0.3em] text-slate-500">AI copilot</div>
-          <h3 className="mt-2 text-2xl font-semibold text-white">Ask anything</h3>
+          <div className="text-sm uppercase tracking-[0.3em] text-slate-500">BI Analytics Agent</div>
+          <h3 className="mt-2 text-2xl font-bold text-white">Copilot Interface</h3>
         </div>
-        <div className="rounded-full border border-[#00C48C]/20 bg-[#00C48C]/10 px-3 py-2 text-sm text-[#67f0c3]">
-          {isQuerying ? 'Thinking...' : 'Ready'}
+        <div className="rounded-full border border-[#00C48C]/20 bg-[#00C48C]/10 px-3.5 py-1.5 text-xs text-[#00C48C] font-semibold">
+          {isQuerying ? 'Thinking...' : 'Concierge Active'}
         </div>
       </div>
 
-      <div className="mt-6 space-y-4 rounded-[24px] border border-white/10 bg-[#05070B] p-4 max-h-[450px] overflow-y-auto">
+      <div className="space-y-4 rounded-[24px] border border-white/10 bg-[#05070B] p-4 max-h-[550px] min-h-[300px] overflow-y-auto flex-1">
         {messages.length === 0 ? (
-          <div className="rounded-[20px] border border-white/10 bg-[#0D121F] p-4 text-sm text-slate-400">
-            Upload a CSV file first. Once synced, you can ask why sales dropped or request forecast trends to render dynamic insight panels.
+          <div className="rounded-[20px] border border-white/10 bg-[#0D121F] p-5 text-xs text-slate-400 leading-6">
+            <span className="text-[#00C48C] font-bold block mb-2">Welcome to the Business Intelligence Workspace</span>
+            Ready to explore? Please select and upload a data signal CSV on the left.
+            Once synced, you can query Rabbit to:
+            <ul className="mt-2 space-y-1.5 pl-3 list-disc">
+              <li>Forecast future demand and run time-series regressions.</li>
+              <li>Scan the dataset for outliers, quality indices, or fraud metrics.</li>
+              <li>Perform regional comparisons, market shares, and segment declines.</li>
+            </ul>
           </div>
         ) : (
           messages.map((message, index) => (
-            <div key={`${message.role}-${index}`} className={`rounded-[20px] border p-4 ${message.role === 'user' ? 'border-[#00C48C]/20 bg-[#00C48C]/10' : 'border-white/10 bg-[#0D121F]'}`}>
-              <div className="text-sm font-medium text-white mb-2">{message.role === 'user' ? 'You' : 'Rabbit'}</div>
-              <div className="mt-2 text-sm leading-7 text-slate-350">{formatMessageText(message.text)}</div>
-              {message.graph === 'bar' && <BarChart data={message.chartData} />}
-              {message.graph === 'line' && <LineChart data={message.chartData} />}
+            <div key={`${message.role}-${index}`} className={`rounded-[20px] border p-4 shadow-sm ${message.role === 'user' ? 'border-[#00C48C]/20 bg-[#00C48C]/10' : 'border-white/10 bg-[#0D121F]'}`}>
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                {message.role === 'user' ? 'You' : 'Rabbit Copilot'}
+              </div>
+              <div className="mt-2 text-xs leading-6 text-slate-300 font-sans">
+                {formatMessageText(message.text)}
+              </div>
+
+              {/* Renders KPIs dynamically */}
+              {message.kpis && message.kpis.length > 0 && (
+                <div className="grid gap-3 grid-cols-1 sm:grid-cols-3 mt-4">
+                  {message.kpis.map((kpi, kIdx) => (
+                    <div key={kIdx} className="rounded-xl border border-white/5 bg-[#05070B]/50 p-3 flex flex-col justify-between">
+                      <span className="text-[9px] uppercase tracking-wider text-slate-400 font-semibold">{kpi.label}</span>
+                      <div className="flex items-baseline gap-2 mt-1">
+                        <span className="text-base font-bold font-mono text-white">{kpi.value}</span>
+                        {kpi.change && (
+                          <span className={`text-[8px] font-semibold ${
+                            kpi.trend === 'up' ? 'text-emerald-400' : kpi.trend === 'down' ? 'text-red-400' : 'text-slate-400'
+                          }`}>
+                            {kpi.change}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Renders dynamic charts */}
+              {message.graph && message.graph.type !== 'none' && (
+                <DataVisualizer
+                  type={message.graph.type}
+                  title={message.graph.title}
+                  data={message.graph.data}
+                />
+              )}
+
+              {/* Renders Next Suggestion Questions */}
+              {message.nextQuestions && message.nextQuestions.length > 0 && (
+                <div className="mt-4 border-t border-white/5 pt-3">
+                  <div className="text-[9px] uppercase tracking-wider text-slate-500 font-semibold mb-2">Recommended Follow-up Questions</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {message.nextQuestions.map((q, qIdx) => (
+                      <button
+                        key={qIdx}
+                        onClick={() => executeQuery(q)}
+                        className="px-3 py-1 rounded-full border border-white/10 hover:border-[#00C48C] hover:text-[#00C48C] text-[9px] text-slate-400 bg-white/5 transition cursor-pointer"
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           ))
         )}
       </div>
 
       {ingestionStage === 'synced' && (
-        <form className="mt-5 flex flex-col gap-3" onSubmit={handlePrompt}>
+        <form className="mt-2 flex flex-col gap-3" onSubmit={handlePrompt}>
           <textarea
-            className="min-h-24 rounded-[20px] border border-white/10 bg-[#05070B] p-4 text-sm text-white outline-none focus:border-[#00C48C]/40 transition"
-            placeholder="Ask why sales dropped, or run a sales forecast..."
+            className="min-h-16 rounded-[20px] border border-white/10 bg-[#05070B] p-4 text-xs text-white outline-none focus:border-[#00C48C]/40 transition w-full resize-none"
+            placeholder="Ask Rabbit about trends, correlations, or anomalies..."
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             disabled={isQuerying}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                executeQuery(prompt);
+                setPrompt('');
+              }
+            }}
           />
           <button 
-            className="rounded-full bg-[#00C48C] px-5 py-3 font-semibold text-[#03110c] transition hover:bg-[#00A877] cursor-pointer disabled:opacity-50" 
+            className="rounded-full bg-[#00C48C] px-5 py-2.5 text-xs font-semibold text-[#03110c] transition hover:bg-[#00A877] cursor-pointer disabled:opacity-50" 
             type="submit"
             disabled={isQuerying || !prompt.trim()}
           >
-            {isQuerying ? 'Analyzing dataset...' : 'Send to Rabbit'}
+            {isQuerying ? 'Calculating results...' : 'Ask Rabbit'}
           </button>
         </form>
       )}
@@ -1061,25 +1196,38 @@ function App() {
               setSupportAgentTyping(true)
               
               try {
-                const response = await fetch('/api/support-chat', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json'
-                  },
-                  body: JSON.stringify({ prompt: text })
-                })
+                let response;
+                try {
+                  response = await fetch('/api/support-chat', {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ prompt: text })
+                  });
+                } catch (networkError: any) {
+                  console.error("[FRONTEND] Network error during support chat:", networkError);
+                  throw new Error("Backend server is not reachable.");
+                }
+                
+                const contentType = response.headers.get('content-type');
+                const isJson = contentType && contentType.includes('application/json');
                 
                 if (!response.ok) {
-                  const errData = await response.json().catch(() => ({}))
-                  throw new Error(errData.detail || 'Server response error.')
+                  throw new Error("AI processing failed.");
+                }
+                
+                if (!isJson) {
+                  throw new Error("Invalid response from server.");
                 }
                 
                 const data = await response.json()
                 setSupportMessages(curr => [...curr, { role: 'agent', text: data.text }])
               } catch (err: any) {
+                console.error("[FRONTEND] Support chat handler failed:", err.message);
                 setSupportMessages(curr => [...curr, { 
                   role: 'agent', 
-                  text: `⚠️ Error: ${err.message || 'Could not communicate with chatbot.'}` 
+                  text: `⚠️ Error: ${err.message || 'AI processing failed.'}` 
                 }])
               } finally {
                 setSupportAgentTyping(false)
@@ -1119,115 +1267,7 @@ function RabbitIcon({ className = 'h-5 w-5' }: { className?: string; solid?: boo
   )
 }
 
-function BarChart({ data }: { data?: Array<{ label: string; value: number }> }) {
-  if (!data || data.length === 0) return null
-  const maxVal = Math.max(...data.map(d => d.value), 1)
-  return (
-    <div className="mt-4 rounded-[20px] border border-white/10 bg-[#0D121F] p-5">
-      <div className="flex items-end gap-3 h-36 pt-4">
-        {data.map((item, index) => {
-          const heightPercent = (item.value / maxVal) * 100
-          return (
-            <div key={item.label + index} className="flex flex-1 flex-col items-center gap-1.5 h-full justify-end group relative">
-              <div className="absolute -top-7 bg-slate-950 border border-white/10 text-white text-[10px] px-2 py-0.5 rounded opacity-0 group-hover:opacity-100 transition pointer-events-none whitespace-nowrap z-10">
-                {item.value.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-              </div>
-              <div 
-                className="w-full rounded-t bg-gradient-to-t from-[#00C48C] to-[#8B5CF6] transition-all duration-300 hover:brightness-110 cursor-pointer" 
-                style={{ height: `${Math.max(heightPercent, 4)}%` }} 
-              />
-              <span className="text-[9px] uppercase tracking-wider text-slate-500 truncate w-full text-center" title={item.label}>
-                {item.label}
-              </span>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-function LineChart({ data }: { data?: Array<{ label: string; value: number; forecast?: boolean }> }) {
-  if (!data || data.length === 0) return null
-  
-  const maxVal = Math.max(...data.map(d => d.value), 1)
-  const minVal = 0
-  
-  const width = 500
-  const height = 180
-  const padding = { top: 15, right: 25, bottom: 25, left: 50 }
-  const chartWidth = width - padding.left - padding.right
-  const chartHeight = height - padding.top - padding.bottom
-  
-  const points = data.map((item, index) => {
-    const x = padding.left + (data.length > 1 ? (index / (data.length - 1)) * chartWidth : 0)
-    const y = padding.top + chartHeight - ((item.value - minVal) / (maxVal - minVal || 1)) * chartHeight
-    return { x, y, ...item }
-  })
-  
-  const forecastStartIndex = points.findIndex(p => p.forecast)
-  
-  let histPath = ''
-  let forePath = ''
-  
-  if (forecastStartIndex === -1) {
-    histPath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
-  } else {
-    const histPoints = points.slice(0, forecastStartIndex + 1)
-    const forePoints = points.slice(forecastStartIndex)
-    histPath = histPoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
-    forePath = forePoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
-  }
-  
-  const yTicks = [0, maxVal / 2, maxVal]
-  
-  return (
-    <div className="mt-4 rounded-[20px] border border-white/10 bg-[#0D121F] p-4">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-40 w-full overflow-visible">
-        {yTicks.map((tick, i) => {
-          const y = padding.top + chartHeight - ((tick - minVal) / (maxVal - minVal || 1)) * chartHeight
-          return (
-            <g key={i}>
-              <line x1={padding.left} y1={y} x2={width - padding.right} y2={y} stroke="rgba(255,255,255,0.05)" strokeWidth="1" />
-              <text x={padding.left - 8} y={y + 3} fill="#64748b" fontSize="8" textAnchor="end">
-                {Math.round(tick).toLocaleString()}
-              </text>
-            </g>
-          )
-        })}
-        
-        {points.map((p, i) => {
-          if (points.length > 5 && i % 2 !== 0 && i !== points.length - 1) return null
-          return (
-            <text key={i} x={p.x} y={height - padding.bottom + 14} fill="#64748b" fontSize="8" textAnchor="middle">
-              {p.label.replace(' (Forecast)', '')}
-            </text>
-          )
-        })}
-        
-        {histPath && (
-          <path d={histPath} fill="none" stroke="#00C48C" strokeWidth="2.5" strokeLinecap="round" />
-        )}
-        {forePath && (
-          <path d={forePath} fill="none" stroke="#8B5CF6" strokeWidth="2" strokeLinecap="round" strokeDasharray="3 3" />
-        )}
-        
-        {points.map((p, i) => (
-          <g key={i} className="group cursor-pointer">
-            <circle cx={p.x} cy={p.y} r={p.forecast ? "3.5" : "4.5"} fill={p.forecast ? "#8B5CF6" : "#00C48C"} stroke="#0D121F" strokeWidth="1.5" />
-            <circle cx={p.x} cy={p.y} r="10" fill="transparent" />
-            <g className="opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none z-20">
-              <rect x={p.x - 40} y={p.y - 26} width="80" height="18" rx="3" fill="#020617" stroke="rgba(255,255,255,0.15)" strokeWidth="1" />
-              <text x={p.x} y={p.y - 14} fill="white" fontSize="9" fontWeight="bold" textAnchor="middle">
-                {p.value.toLocaleString(undefined, { maximumFractionDigits: 1 })}
-              </text>
-            </g>
-          </g>
-        ))}
-      </svg>
-    </div>
-  )
-}
+// Old BarChart and LineChart components removed. Dynamic visualizer is used instead.
 
 function formatMessageText(text: string) {
   return text.split('\n').map((line, idx) => {
