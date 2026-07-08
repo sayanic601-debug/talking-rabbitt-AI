@@ -57,6 +57,7 @@ function App() {
     email: string
     company: string
     role: string
+    photoUrl?: string
   }>(() => {
     if (typeof window === 'undefined') {
       return { name: 'Aisha Patel', email: 'aisha@northstar.ai', company: 'Northstar Labs', role: 'VP Strategy' }
